@@ -29,11 +29,15 @@ class EmeraldClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.messages = True
+        intents.reactions = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
         """Sync commands with test guild"""
+        from commands.moments import setup as moments_setup
+        await moments_setup(self)
         guild = discord.Object(id=config.DISCORD_GUILD)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
