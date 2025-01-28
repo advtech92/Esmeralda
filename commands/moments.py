@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import logging
 from utils.database import Database
@@ -8,77 +8,33 @@ from utils.database import Database
 db = Database()
 
 
-async def setup(client):
-    moments_group = app_commands.Group(
-        name="moments",
-        description="Capture and manage important moments"
-    )
+class IncidentModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Log Incident")
+        self.reason = discord.ui.TextInput(
+            label="Reason for logging",
+            style=discord.TextStyle.long,
+            required=True
+        )
+        self.message_count = discord.ui.TextInput(
+            label="Messages to capture (1-50)",
+            default="10",
+            required=True
+        )
 
-    # Funny moment command
-    @moments_group.command(
-        name="funny",
-        description="Tag a funny moment with reactions"
-    )
-    @app_commands.describe(
-        message_link="Link to the funny message",
-        description="Optional description"
-    )
-    async def funny_moment(
-        interaction: discord.Interaction,
-        message_link: str,
-        description: Optional[str] = None
-    ):
+        self.add_item(self.reason)
+        self.add_item(self.message_count)
+
+    async def on_submit(self, interaction: discord.Interaction):
         try:
-            parts = message_link.split("/")
-            channel_id = int(parts[-2])
-            message_id = int(parts[-1])
+            count = int(self.message_count.value)
+            if not 1 <= count <= 50:
+                raise ValueError
 
-            channel = interaction.guild.get_channel(channel_id)
-            message = await channel.fetch_message(message_id)
-
-            await message.add_reaction("😂")
-            await message.add_reaction("🎉")
-
-            # Store in database
-            record_id = db.add_funny_moment(
-                message_link=message_link,
-                author_id=message.author.id,
-                description=description
-            )
-
-            await interaction.response.send_message(
-                f"✅ Funny moment registered! (ID: {record_id})",
-                ephemeral=True
-            )
-
-        except Exception as e:
-            logging.error(f"Funny moment error: {e}")
-            await interaction.response.send_message(
-                "❌ Failed to register funny moment. Check message link!",
-                ephemeral=True
-            )
-
-    # Incident command
-    @moments_group.command(
-        name="incident",
-        description="Log an incident with recent messages"
-    )
-    @app_commands.describe(
-        message_count="Number of messages to capture (max 50)",
-        reason="Reason for logging"
-    )
-    @app_commands.checks.has_permissions(manage_messages=True)
-    async def incident_log(
-        interaction: discord.Interaction,
-        message_count: app_commands.Range[int, 1, 50],
-        reason: str
-    ):
-        try:
             messages = [
-                msg async for msg in interaction.channel.history(limit=message_count)
+                msg async for msg in interaction.channel.history(limit=count)
             ][::-1]
 
-            # Prepare messages for storage
             formatted_messages = [{
                 "id": msg.id,
                 "author_id": msg.author.id,
@@ -86,13 +42,11 @@ async def setup(client):
                 "timestamp": msg.created_at
             } for msg in messages]
 
-            # Generate incident ID
             incident_id = f"incident_{int(datetime.now().timestamp())}"
 
-            # Store in database
             success = db.add_incident(
                 incident_id=incident_id,
-                reason=reason,
+                reason=self.reason.value,
                 moderator_id=interaction.user.id,
                 messages=formatted_messages
             )
@@ -100,21 +54,81 @@ async def setup(client):
             if not success:
                 raise Exception("Database storage failed")
 
+            embed = discord.Embed(
+                title="Incident Logged",
+                description=f"**ID:** `{incident_id}`\n**Reason:** {self.reason.value}",
+                color=0xff0000
+            )
+            preview = messages[0].content[:50] + "..." if messages else "No messages"
+            embed.add_field(name="First Message", value=preview, inline=False)
+
             await interaction.response.send_message(
-                f"✅ Incident logged with ID `{incident_id}`\n"
-                f"**Reason:** {reason}\n"
-                f"Captured {len(messages)} messages",
+                embed=embed,
+                ephemeral=True
+            )
+
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Please enter a number between 1-50",
+                ephemeral=True
+            )
+
+
+async def setup(client):
+    # Context menu command
+    @client.tree.context_menu(name="Mark as Funny Moment")
+    async def mark_funny(interaction: discord.Interaction, message: discord.Message):
+        try:
+            await message.add_reaction("😂")
+            await message.add_reaction("🎉")
+
+            message_link = f"https://discord.com/channels/{interaction.guild_id}/{message.channel.id}/{message.id}"
+            record_id = db.add_funny_moment(
+                message_link=message_link,
+                author_id=message.author.id
+            )
+
+            embed = discord.Embed(
+                title="😂 Funny Moment Saved",
+                description=f"[Jump to Message]({message_link})",
+                color=0x00ff00
+            ).set_author(
+                name=message.author.display_name,
+                icon_url=message.author.avatar.url
+            ).add_field(
+                name="Message Preview",
+                value=message.content[:100] + "..." if len(message.content) > 100 else message.content,
+                inline=False
+            )
+
+            await interaction.response.send_message(
+                embed=embed,
                 ephemeral=True
             )
 
         except Exception as e:
-            logging.error(f"Incident log error: {e}")
+            logging.error(f"Context menu error: {e}")
             await interaction.response.send_message(
-                "❌ Failed to log incident. Check permissions and message count!",
+                "❌ Couldn't mark this message. Is it too old?",
                 ephemeral=True
             )
 
-    # Add review command
+    # Command group
+    moments_group = app_commands.Group(
+        name="moments",
+        description="Manage memorable moments"
+    )
+
+    # Incident command
+    @moments_group.command(
+        name="incident",
+        description="Log an incident with recent messages"
+    )
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def incident_log(interaction: discord.Interaction):
+        await interaction.response.send_modal(IncidentModal())
+
+    # Review command
     @moments_group.command(
         name="review",
         description="Review a logged incident"
@@ -136,7 +150,6 @@ async def setup(client):
                 )
                 return
 
-            # Format response
             messages = "\n\n".join(
                 f"**{msg['timestamp']}** <@{msg['author_id']}>:\n"
                 f"{msg['content']}"
@@ -165,5 +178,17 @@ async def setup(client):
                 "❌ Failed to retrieve incident",
                 ephemeral=True
             )
+
+    # Autocomplete
+    @review_incident.autocomplete("incident_id")
+    async def incident_autocomplete(
+        interaction: discord.Interaction,
+        current: str
+    ) -> List[app_commands.Choice[str]]:
+        incidents = db.get_recent_incidents(interaction.user.id, 25)
+        return [
+            app_commands.Choice(name=inc["id"], value=inc["id"])
+            for inc in incidents if current.lower() in inc["id"].lower()
+        ][:25]
 
     client.tree.add_command(moments_group)

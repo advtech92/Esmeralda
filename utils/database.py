@@ -119,3 +119,15 @@ class Database:
                 "details": dict(incident),
                 "messages": [dict(msg) for msg in messages]
             }
+
+    def get_recent_incidents(self, moderator_id: int, limit: int = 25):
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id FROM incidents
+                WHERE moderator_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (moderator_id, limit))
+            return [dict(row) for row in cursor.fetchall()]
