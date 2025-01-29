@@ -55,6 +55,17 @@ class Database:
                     FOREIGN KEY (incident_id) REFERENCES incidents(id)
                 )
             """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS incident_followups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incident_id TEXT NOT NULL,
+                    moderator_id INTEGER NOT NULL,
+                    notes TEXT NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    FOREIGN KEY (incident_id) REFERENCES incidents(id)
+                )
+            """)
             conn.commit()
 
     def _get_connection(self):
@@ -120,27 +131,25 @@ class Database:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # Get incident details
-            cursor.execute("""
-                SELECT * FROM incidents
-                WHERE id = ?
-            """, (incident_id,))
+            # Get incident details and parse timestamp
+            cursor.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,))
             incident = cursor.fetchone()
-
             if not incident:
                 return None
 
-            # Get related messages
-            cursor.execute("""
-                SELECT * FROM incident_messages
-                WHERE incident_id = ?
-                ORDER BY timestamp ASC
-            """, (incident_id,))
-            messages = cursor.fetchall()
+            incident_details = dict(incident)
+            incident_details['timestamp'] = datetime.fromisoformat(incident_details['timestamp'])  # Convert string to datetime
+
+            # Get messages with parsed timestamps
+            cursor.execute("SELECT * FROM incident_messages WHERE incident_id = ?", (incident_id,))
+            messages = [
+                {**dict(msg), 'timestamp': datetime.fromisoformat(msg['timestamp'])} 
+                for msg in cursor.fetchall()
+            ]
 
             return {
-                "details": dict(incident),
-                "messages": [dict(msg) for msg in messages]
+                "details": incident_details,
+                "messages": messages
             }
 
     def get_recent_incidents(self, limit: int = 25):
@@ -154,3 +163,29 @@ class Database:
                 LIMIT ?
             """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
+
+    def add_followup(self, incident_id: str, moderator_id: int, notes: str) -> bool:
+        """Add a follow-up report to an incident"""
+        try:
+            with self._get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO incident_followups 
+                    (incident_id, moderator_id, notes, timestamp)
+                    VALUES (?, ?, ?, ?)
+                """, (incident_id, moderator_id, notes, datetime.now()))
+                conn.commit()
+                return True
+        except Exception as e:
+            logging.error(f"Failed to add followup: {str(e)}")
+            return False
+
+    def get_followups(self, incident_id: str) -> List[Dict]:
+        """Get follow-ups with proper timestamps"""
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM incident_followups WHERE incident_id = ?", (incident_id,))
+            return [
+                {**dict(row), 'timestamp': datetime.fromisoformat(row['timestamp'])}
+                for row in cursor.fetchall()
+            ]

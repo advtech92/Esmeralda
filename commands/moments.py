@@ -18,6 +18,16 @@ from utils.database import Database
 
 db = Database()
 
+import discord
+from discord import app_commands
+from typing import Optional, List
+from datetime import datetime
+import logging
+import uuid
+from utils.database import Database
+
+db = Database()
+
 class IncidentModal(discord.ui.Modal):
     def __init__(self):
         super().__init__(title="Log Incident")
@@ -123,7 +133,7 @@ class IncidentModal(discord.ui.Modal):
             embed = discord.Embed(
                 title="✅ Incident Logged",
                 description=f"**ID:** `{incident_id}`\n**Mode:** {capture_mode.title()}",
-                color=0xff0000
+                color=0x00ff00
             )
             embed.add_field(name="Reason", value=self.reason.value[:500], inline=False)
             
@@ -145,6 +155,41 @@ class IncidentModal(discord.ui.Modal):
                 ephemeral=True
             )
 
+class FollowupModal(discord.ui.Modal):
+    def __init__(self, incident_id: str):
+        super().__init__(title=f"Follow-up: {incident_id}")
+        self.incident_id = incident_id
+        self.notes = discord.ui.TextInput(
+            label="Additional notes/actions",
+            style=discord.TextStyle.long,
+            required=True
+        )
+        self.add_item(self.notes)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            success = db.add_followup(
+                incident_id=self.incident_id,
+                moderator_id=interaction.user.id,
+                notes=self.notes.value
+            )
+            
+            if success:
+                await interaction.response.send_message(
+                    f"✅ Follow-up added to **{self.incident_id}**",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ Failed to save follow-up",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logging.error(f"Followup error: {str(e)}")
+            await interaction.response.send_message(
+                "⚠️ Failed to add follow-up",
+                ephemeral=True
+            )
 
 async def setup(client):
     # Context menu command
@@ -205,31 +250,30 @@ async def setup(client):
         name="review",
         description="Review a logged incident"
     )
-    @app_commands.describe(
-        incident_id="The incident ID to review"
-    )
+    @app_commands.describe(incident_id="The incident ID to review")
     @app_commands.checks.has_permissions(manage_messages=True)
-    async def review_incident(
-        interaction: discord.Interaction,
-        incident_id: str
-    ):
+    async def review_incident(interaction: discord.Interaction, incident_id: str):
         try:
             incident = db.get_incident(incident_id)
             if not incident:
-                await interaction.response.send_message(
-                    "❌ Incident not found",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("❌ Incident not found", ephemeral=True)
                 return
 
+            # Format messages
             messages = "\n\n".join(
-                f"**{msg['timestamp']}** <@{msg['author_id']}>:\n"
-                f"{msg['content']}"
+                f"**<t:{int(msg['timestamp'].timestamp())}:F>** <@{msg['author_id']}>:\n{msg['content']}"
                 for msg in incident['messages']
             )
 
-            moderator = await interaction.guild.fetch_member(incident['details']['moderator_id'])
+            # Format follow-ups
+            followups = db.get_followups(incident_id)
+            followup_text = "\n\n".join(
+                f"**<t:{int(f['timestamp'].timestamp())}:f>** <@{f['moderator_id']}>:\n{f['notes'][:200]}"
+                for f in followups
+            ) if followups else "No follow-up reports yet"
 
+            # Create embed
+            moderator = await interaction.guild.fetch_member(incident['details']['moderator_id'])
             embed = discord.Embed(
                 title=f"Incident {incident_id}",
                 description=(
@@ -239,39 +283,82 @@ async def setup(client):
                 ),
                 color=0xff0000
             )
+            embed.add_field(name="Messages", value=messages[:1020] + "..." if len(messages) > 1024 else messages, inline=False)
+            embed.add_field(name=f"Follow-ups ({len(followups)})", value=followup_text[:1020] + "..." if len(followup_text) > 1024 else followup_text, inline=False)
 
-            embed.add_field(
-                name="Messages",
-                value=messages[:1020] + "..." if len(messages) > 1024 else messages,
-                inline=False
-            )
-
-            await interaction.response.send_message(
-                embed=embed,
-                ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         except Exception as e:
-            logging.error(f"Incident review error: {e}")
+            logging.error(f"Incident review error: {str(e)}", exc_info=True)
+            await interaction.response.send_message("❌ Failed to retrieve incident", ephemeral=True)
+
+    # Followup commands
+    @moments_group.command(
+        name="followup",
+        description="Add follow-up to an incident"
+    )
+    @app_commands.describe(
+        incident_id="The incident ID to follow up on",
+        notes="Quick note (optional)"
+    )
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def add_followup(
+        interaction: discord.Interaction,
+        incident_id: str,
+        notes: Optional[str] = None
+    ):
+        try:
+            if not db.get_incident(incident_id):
+                await interaction.response.send_message(
+                    "❌ Incident not found",
+                    ephemeral=True
+                )
+                return
+
+            if notes:
+                success = db.add_followup(
+                    incident_id=incident_id,
+                    moderator_id=interaction.user.id,
+                    notes=notes
+                )
+
+                if success:
+                    await interaction.response.send_message(
+                        f"✅ Added quick follow-up to **{incident_id}**",
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "❌ Failed to add follow-up",
+                        ephemeral=True
+                    )
+            else:
+                await interaction.response.send_modal(FollowupModal(incident_id))
+
+        except Exception as e:
+            logging.error(f"Followup error: {e}")
             await interaction.response.send_message(
-                "❌ Failed to retrieve incident",
+                "⚠️ Failed to add follow-up",
                 ephemeral=True
             )
 
     # Autocomplete
     @review_incident.autocomplete("incident_id")
+    @add_followup.autocomplete("incident_id")
     async def incident_autocomplete(
         interaction: discord.Interaction,
         current: str
     ) -> List[app_commands.Choice[str]]:
-        # Changed to get all incidents, not just current mod's
         incidents = db.get_recent_incidents(25)
-        return [
-            app_commands.Choice(
-                name=f"{inc['id']} (by {await interaction.guild.fetch_member(inc['moderator_id'])})",
-                value=inc['id']
-            )
-            for inc in incidents if current.lower() in inc['id'].lower()
-        ][:25]
+        choices = []
+        for inc in incidents:
+            try:
+                mod = await interaction.guild.fetch_member(inc['moderator_id'])
+                name = f"{inc['id']} (by {mod.display_name})"
+            except:
+                name = inc['id']
+            if current.lower() in name.lower():
+                choices.append(app_commands.Choice(name=name, value=inc['id']))
+        return choices[:25]
 
     client.tree.add_command(moments_group)
