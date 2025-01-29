@@ -4,6 +4,11 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 
+import sqlite3
+import logging
+from datetime import datetime
+from typing import List, Dict, Optional
+
 class Database:
     def __init__(self, db_path: str = "data/moments.db"):
         self.db_path = db_path
@@ -12,6 +17,10 @@ class Database:
     def _init_db(self):
         """Initialize database tables"""
         with self._get_connection() as conn:
+            # Drop tables if they exist (for development)
+            conn.execute("DROP TABLE IF EXISTS incidents")
+            conn.execute("DROP TABLE IF EXISTS incident_messages")
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS funny_moments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,7 +36,11 @@ class Database:
                     id TEXT PRIMARY KEY,
                     reason TEXT NOT NULL,
                     moderator_id INTEGER NOT NULL,
-                    timestamp DATETIME NOT NULL
+                    timestamp DATETIME NOT NULL,
+                    capture_mode TEXT NOT NULL,
+                    capture_param TEXT,
+                    start_time DATETIME,
+                    end_time DATETIME
                 )
             """)
 
@@ -42,34 +55,32 @@ class Database:
                     FOREIGN KEY (incident_id) REFERENCES incidents(id)
                 )
             """)
-
             conn.commit()
 
     def _get_connection(self):
         return sqlite3.connect(self.db_path)
 
-    def add_funny_moment(self, message_link: str, author_id: int, description: str = None) -> int:
-        """Store a funny moment in database"""
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO funny_moments 
-                (message_link, description, author_id, timestamp)
-                VALUES (?, ?, ?, ?)
-            """, (message_link, description, author_id, datetime.now()))
-            conn.commit()
-            return cursor.lastrowid
-
-    def add_incident(self, incident_id: str, reason: str, moderator_id: int, messages: List[Dict]) -> bool:
+    def add_incident(self, incident_id: str, reason: str, moderator_id: int, 
+                    messages: List[Dict], capture_mode: str, capture_param: str,
+                    start_time: datetime = None, end_time: datetime = None) -> bool:
         """Store an incident with related messages"""
         try:
             with self._get_connection() as conn:
                 # Add incident record
                 conn.execute("""
                     INSERT INTO incidents 
-                    (id, reason, moderator_id, timestamp)
-                    VALUES (?, ?, ?, ?)
-                """, (incident_id, reason, moderator_id, datetime.now()))
+                    (id, reason, moderator_id, timestamp, capture_mode, capture_param, start_time, end_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    incident_id,
+                    reason,
+                    moderator_id,
+                    datetime.now(),
+                    capture_mode,
+                    capture_param,
+                    start_time,
+                    end_time
+                ))
 
                 # Add incident messages
                 for msg in messages:
@@ -88,8 +99,20 @@ class Database:
                 conn.commit()
                 return True
         except Exception as e:
-            logging.error(f"Failed to save incident: {e}")
+            logging.error(f"Failed to save incident: {str(e)}")
             return False
+
+    def add_funny_moment(self, message_link: str, author_id: int, description: str = None) -> int:
+        """Store a funny moment in database"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO funny_moments 
+                (message_link, description, author_id, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (message_link, description, author_id, datetime.now()))
+            conn.commit()
+            return cursor.lastrowid
 
     def get_incident(self, incident_id: str) -> Optional[Dict]:
         """Retrieve an incident with its messages"""
