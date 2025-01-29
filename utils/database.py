@@ -143,14 +143,14 @@ class Database:
                 "messages": [dict(msg) for msg in messages]
             }
 
-    def get_recent_incidents(self, moderator_id: int, limit: int = 25):
+    def get_recent_incidents(self, limit: int = 25):
+        """Get all recent incidents (not limited to current moderator)"""
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT id FROM incidents
-                WHERE moderator_id = ?
+                SELECT id, moderator_id FROM incidents
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """, (moderator_id, limit))
+            """, (limit,))
             return [dict(row) for row in cursor.fetchall()]

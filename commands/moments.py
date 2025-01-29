@@ -228,15 +228,17 @@ async def setup(client):
                 for msg in incident['messages']
             )
 
+            moderator = await interaction.guild.fetch_member(incident['details']['moderator_id'])
+
             embed = discord.Embed(
                 title=f"Incident {incident_id}",
                 description=(
                     f"**Reason:** {incident['details']['reason']}\n"
-                    f"**Capture Mode:** {incident['details']['capture_mode'].title()}\n"
-                    f"**Params:** {incident['details']['capture_param']}"
-                    ),
-                    color=0xff0000
-                )
+                    f"**Logged by:** {moderator.mention}\n"
+                    f"**When:** <t:{int(incident['details']['timestamp'].timestamp())}:F>"
+                ),
+                color=0xff0000
+            )
 
             embed.add_field(
                 name="Messages",
@@ -262,10 +264,14 @@ async def setup(client):
         interaction: discord.Interaction,
         current: str
     ) -> List[app_commands.Choice[str]]:
-        incidents = db.get_recent_incidents(interaction.user.id, 25)
+        # Changed to get all incidents, not just current mod's
+        incidents = db.get_recent_incidents(25)
         return [
-            app_commands.Choice(name=inc["id"], value=inc["id"])
-            for inc in incidents if current.lower() in inc["id"].lower()
+            app_commands.Choice(
+                name=f"{inc['id']} (by {await interaction.guild.fetch_member(inc['moderator_id'])})",
+                value=inc['id']
+            )
+            for inc in incidents if current.lower() in inc['id'].lower()
         ][:25]
 
     client.tree.add_command(moments_group)
