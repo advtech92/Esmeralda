@@ -1,4 +1,3 @@
-import os
 import logging
 import discord
 from discord import app_commands
@@ -10,6 +9,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     DISCORD_TOKEN: str
     DISCORD_GUILD: int
+    HIGHLIGHT_CHANNEL_ID: int
 
     class Config:
         env_file = ".env"
@@ -37,9 +37,13 @@ class EmeraldClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # Load commands
+        # Load command modules
         from commands.moments import setup as moments_setup
-        await moments_setup(self)
+        from commands.incidents import setup as incidents_setup
+
+        # Initialize command groups
+        moments_setup(self)
+        incidents_setup(self)
 
         # Sync commands
         guild = discord.Object(id=config.DISCORD_GUILD)
@@ -58,14 +62,5 @@ class EmeraldClient(discord.Client):
 if __name__ == "__main__":
     load_dotenv()
     client = EmeraldClient()
-
-    # Global error handler
-    @client.tree.error
-    async def on_error(interaction: discord.Interaction, error):
-        logging.error(f"Error: {error}")
-        await interaction.response.send_message(
-            "⚠️ Something went wrong. Please try again.",
-            ephemeral=True
-        )
 
     client.run(config.DISCORD_TOKEN)

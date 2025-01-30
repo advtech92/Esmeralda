@@ -1,181 +1,110 @@
 import discord
 from discord import app_commands
-from typing import Optional, List
-from datetime import datetime, timedelta
-import sqlite3
+from discord.ext import tasks
+from typing import Optional
+from datetime import datetime, timedelta, time, timezone
 import logging
+import os
 from utils.database import Database
-from discord.app_commands import MissingPermissions
 
 db = Database()
 
 
-class IncidentModal(discord.ui.Modal):
-    def __init__(self):
-        super().__init__(title="Log Incident")
-        self.reason = discord.ui.TextInput(
-            label="Reason for logging",
-            style=discord.TextStyle.long,
-            required=True
-        )
-        self.message_count = discord.ui.TextInput(
-            label="Recent messages to capture (1-50)",
-            placeholder="Leave blank to use timeframe",
-            default="",
-            required=False
-        )
-        self.start_time = discord.ui.TextInput(
-            label="Start time (YYYY-MM-DD HH:MM)",
-            placeholder="Optional - Example: 2024-05-10 14:30",
-            required=False
-        )
-        self.end_time = discord.ui.TextInput(
-            label="End time (YYYY-MM-DD HH:MM)",
-            placeholder="Optional - Example: 2024-05-10 15:00",
-            required=False
-        )
+class FunnyMoments:
+    def __init__(self, client):
+        self.client = client
+        self.retention_days = 30
+        self.highlight_channel = None  # Will be set in on_ready
 
-        self.add_item(self.reason)
-        self.add_item(self.message_count)
-        self.add_item(self.start_time)
-        self.add_item(self.end_time)
+        # Start scheduled tasks
+        self.weekly_highlight.start()
+        self.daily_purge.start()
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def on_ready(self):
+        """Initialize channel after bot is ready"""
+        channel_id = int(os.getenv("HIGHLIGHT_CHANNEL_ID"))
+        self.highlight_channel = self.client.get_channel(channel_id)
+        if not self.highlight_channel:
+            logging.error("Invalid highlight channel ID in .env")
+
+    @tasks.loop(time=time(hour=9, minute=0, tzinfo=timezone.utc))
+    async def weekly_highlight(self):
         try:
-            messages = []
-            capture_mode = "count"
-            capture_param = ""
-            start_time = None
-            end_time = None
+            # Only run on Mondays (0 = Monday)
+            if datetime.now(timezone.utc).weekday() != 0:
+                return
 
-            # Determine capture mode
-            if self.start_time.value or self.end_time.value:
-                if not all([self.start_time.value, self.end_time.value]):
-                    raise ValueError("Both start and end times required for timeframe")
+            start_date = datetime.now(timezone.utc) - timedelta(days=7)
+            moments = db.get_funny_moments_since(start_date)
 
-                start_time = datetime.strptime(self.start_time.value, "%Y-%m-%d %H:%M")
-                end_time = datetime.strptime(self.end_time.value, "%Y-%m-%d %H:%M")
-
-                if start_time >= end_time:
-                    raise ValueError("End time must be after start time")
-
-                if (end_time - start_time).total_seconds() > 86400:
-                    raise ValueError("Maximum timeframe duration is 24 hours")
-
-                async for msg in interaction.channel.history(
-                    limit=None,
-                    after=start_time,
-                    before=end_time
-                ):
-                    messages.append(msg)
-
-                messages = messages[::-1]  # Oldest first
-                capture_mode = "timeframe"
-                capture_param = f"{start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}"
-
-            else:
-                if not self.message_count.value:
-                    raise ValueError("Please provide either message count or timeframe")
-
-                count = int(self.message_count.value)
-                if not 1 <= count <= 50:
-                    raise ValueError("Message count must be between 1-50")
-
-                messages = [
-                    msg async for msg in interaction.channel.history(limit=count)
-                ][::-1]
-                capture_mode = "count"
-                capture_param = str(count)
-
-            # Format messages
-            formatted_messages = [{
-                "id": msg.id,
-                "author_id": msg.author.id,
-                "content": msg.content,
-                "timestamp": msg.created_at
-            } for msg in messages]
-
-            # Generate unique ID
-            incident_id = f"incident_{uuid.uuid4().hex[:8]}"
-
-            success = db.add_incident(
-                incident_id=incident_id,
-                reason=self.reason.value,
-                moderator_id=interaction.user.id,
-                messages=formatted_messages,
-                capture_mode=capture_mode,
-                capture_param=capture_param,
-                start_time=start_time,
-                end_time=end_time
-            )
-
-            if not success:
-                raise Exception("Database storage failed - check server logs")
+            if not moments or not self.highlight_channel:
+                return
 
             embed = discord.Embed(
-                title="✅ Incident Logged",
-                description=f"**ID:** `{incident_id}`\n**Mode:** {capture_mode.title()}",
+                title="😂 Weekly Funny Moments Highlight",
                 color=0x00ff00
             )
-            embed.add_field(name="Reason", value=self.reason.value[:500], inline=False)
 
-            if messages:
-                preview = f"{messages[0].content[:100]}..." if len(messages[0].content) > 100 else messages[0].content
-                embed.add_field(name="First Message", value=preview, inline=False)
+            for idx, moment in enumerate(moments[:5], 1):
+                embed.add_field(
+                    name=f"Moment #{idx}",
+                    value=f"[Jump to Message]({moment['message_link']})",
+                    inline=False
+                )
 
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await self.highlight_channel.send(embed=embed)
 
-        except ValueError as e:
-            await interaction.response.send_message(
-                f"❌ Validation Error: {str(e)}",
-                ephemeral=True
-            )
         except Exception as e:
-            logging.error(f"Incident submission error: {str(e)}", exc_info=True)
-            await interaction.response.send_message(
-                "⚠️ Failed to log incident - please check input format",
-                ephemeral=True
-            )
+            logging.error(f"Weekly highlight error: {str(e)}")
 
-
-class FollowupModal(discord.ui.Modal):
-    def __init__(self, incident_id: str):
-        super().__init__(title=f"Follow-up: {incident_id}")
-        self.incident_id = incident_id
-        self.notes = discord.ui.TextInput(
-            label="Additional notes/actions",
-            style=discord.TextStyle.long,
-            required=True
-        )
-        self.add_item(self.notes)
-
-    async def on_submit(self, interaction: discord.Interaction):
+    @tasks.loop(hours=24)
+    async def daily_purge(self):
         try:
-            success = db.add_followup(
-                incident_id=self.incident_id,
-                moderator_id=interaction.user.id,
-                notes=self.notes.value
-            )
-
-            if success:
-                await interaction.response.send_message(
-                    f"✅ Follow-up added to **{self.incident_id}**",
-                    ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    "❌ Failed to save follow-up",
-                    ephemeral=True
-                )
+            cutoff = datetime.utcnow() - timedelta(days=self.retention_days)
+            deleted_count = db.purge_old_funny_moments(cutoff)
+            logging.info(f"Purged {deleted_count} old funny moments")
         except Exception as e:
-            logging.error(f"Followup error: {str(e)}")
+            logging.error(f"Purge error: {str(e)}")
+
+    @weekly_highlight.before_loop
+    @daily_purge.before_loop
+    async def before_tasks(self):
+        await self.client.wait_until_ready()
+
+
+def setup(client):
+    # Create command group
+    moments_group = app_commands.Group(name="moments", description="Manage funny moments")
+
+    # Add purge command to the group
+    @moments_group.command(
+        name="purge",
+        description="Purge old funny moments"
+    )
+    @app_commands.describe(days="Purge moments older than X days (0 to disable)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_funny(interaction: discord.Interaction, days: int = 30):
+        try:
+            if days < 0:
+                raise ValueError("Days must be >= 0")
+
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            deleted_count = db.purge_old_funny_moments(cutoff)
+
             await interaction.response.send_message(
-                "⚠️ Failed to add follow-up",
+                f"✅ Purged {deleted_count} moments older than {days} days",
                 ephemeral=True
             )
 
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Error: {str(e)}",
+                ephemeral=True
+            )
 
-async def setup(client):
+    # Create FunnyMoments instance
+    funny_moments = FunnyMoments(client)
+
     # Context menu command
     @client.tree.context_menu(name="Mark as Funny Moment")
     async def mark_funny(interaction: discord.Interaction, message: discord.Message):
@@ -202,10 +131,7 @@ async def setup(client):
                 inline=False
             )
 
-            await interaction.response.send_message(
-                embed=embed,
-                ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         except Exception as e:
             logging.error(f"Context menu error: {e}")
@@ -214,213 +140,27 @@ async def setup(client):
                 ephemeral=True
             )
 
-    # Command group
-    moments_group = app_commands.Group(
-        name="moments",
-        description="Manage memorable moments"
-    )
-
-    # Incident command
-    @moments_group.command(
-        name="incident",
-        description="Log an incident with recent messages"
-    )
+    # Purge command
+    @app_commands.command(name="purge_funny")
+    @app_commands.describe(days="Purge moments older than X days (0 to disable)")
     @app_commands.checks.has_permissions(manage_messages=True)
-    async def incident_log(interaction: discord.Interaction):
-        await interaction.response.send_modal(IncidentModal())
-
-    # Review command
-    @moments_group.command(
-        name="review",
-        description="Review a logged incident"
-    )
-    @app_commands.describe(incident_id="The incident ID to review")
-    @app_commands.checks.has_permissions(manage_messages=True)
-    async def review_incident(interaction: discord.Interaction, incident_id: str):
+    async def purge_funny(interaction: discord.Interaction, days: int = 30):
         try:
-            incident = db.get_incident(incident_id)
-            if not incident:
-                await interaction.response.send_message("❌ Incident not found", ephemeral=True)
-                return
+            if days < 0:
+                raise ValueError("Days must be >= 0")
 
-            # Format messages with proper timestamps
-            messages = "\n\n".join(
-                f"**<t:{int(msg['timestamp'].timestamp())}:F>** <@{msg['author_id']}>:\n"
-                f"{msg['content']}"
-                for msg in incident['messages']
-            )
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            deleted_count = db.purge_old_funny_moments(cutoff)
 
-            # Get follow-ups with proper timestamps
-            followups = db.get_followups(incident_id)
-            followup_text = "\n\n".join(
-                f"**<t:{int(f['timestamp'].timestamp())}:f>** <@{f['moderator_id']}>:\n{f['notes'][:200]}"
-                for f in followups
-            ) if followups else "No follow-up reports yet"
-
-            # Create embed
-            moderator = await interaction.guild.fetch_member(incident['details']['moderator_id'])
-            embed = discord.Embed(
-                title=f"Incident {incident_id}",
-                description=(
-                    f"**Reason:** {incident['details']['reason']}\n"
-                    f"**Logged by:** {moderator.mention}\n"
-                    f"**When:** <t:{int(incident['details']['timestamp'].timestamp())}:F>"
-                ),
-                color=0xff0000
-            )
-
-            embed.add_field(
-                name="Messages",
-                value=messages[:1020] + "..." if len(messages) > 1024 else messages,
-                inline=False
-            )
-
-            embed.add_field(
-                name=f"Follow-ups ({len(followups)})",
-                value=followup_text[:1020] + "..." if len(followup_text) > 1024 else followup_text,
-                inline=False
-            )
-
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        except Exception as e:
-            logging.error(f"Incident review error: {str(e)}", exc_info=True)
-            await interaction.response.send_message("❌ Failed to retrieve incident", ephemeral=True)
-
-    # Followup commands
-    @moments_group.command(
-        name="followup",
-        description="Add follow-up to an incident"
-    )
-    @app_commands.describe(
-        incident_id="The incident ID to follow up on",
-        notes="Quick note (optional)"
-    )
-    @app_commands.checks.has_permissions(manage_messages=True)
-    async def add_followup(
-        interaction: discord.Interaction,
-        incident_id: str,
-        notes: Optional[str] = None
-    ):
-        try:
-            if not db.get_incident(incident_id):
-                await interaction.response.send_message(
-                    "❌ Incident not found",
-                    ephemeral=True
-                )
-                return
-
-            if notes:
-                success = db.add_followup(
-                    incident_id=incident_id,
-                    moderator_id=interaction.user.id,
-                    notes=notes
-                )
-
-                if success:
-                    await interaction.response.send_message(
-                        f"✅ Added quick follow-up to **{incident_id}**",
-                        ephemeral=True
-                    )
-                else:
-                    await interaction.response.send_message(
-                        "❌ Failed to add follow-up",
-                        ephemeral=True
-                    )
-            else:
-                await interaction.response.send_modal(FollowupModal(incident_id))
-
-        except Exception as e:
-            logging.error(f"Followup error: {e}")
             await interaction.response.send_message(
-                "⚠️ Failed to add follow-up",
+                f"✅ Purged {deleted_count} moments older than {days} days",
                 ephemeral=True
             )
 
-    # Autocomplete
-    @review_incident.autocomplete("incident_id")
-    @add_followup.autocomplete("incident_id")
-    async def incident_autocomplete(
-        interaction: discord.Interaction,
-        current: str
-    ) -> List[app_commands.Choice[str]]:
-        incidents = db.get_recent_incidents(25)
-        choices = []
-        for inc in incidents:
-            try:
-                mod = await interaction.guild.fetch_member(inc['moderator_id'])
-                name = f"{inc['id']} (by {mod.display_name})"
-            except:
-                name = inc['id']
-            if current.lower() in name.lower():
-                choices.append(app_commands.Choice(name=name, value=inc['id']))
-        return choices[:25]
-
-    # Global error handler for commands
-    @client.tree.error
-    async def on_command_error(interaction: discord.Interaction, error):
-        """Handle unauthorized access attempts"""
-        if isinstance(error, MissingPermissions):
-            # Log unauthorized access
-            db.log_unauthorized_access(
-                user_id=interaction.user.id,
-                command_used=interaction.command.name if interaction.command else "unknown",
-                details=f"Attempted params: {interaction.data}"
-            )
-
-            await interaction.response.send_message(
-                "⛔ You don't have permission to use this command.",
-                ephemeral=True
-            )
-        else:
-            logging.error(f"Command error: {error}", exc_info=True)
-            await interaction.response.send_message(
-                "⚠️ An unexpected error occurred. This has been logged.",
-                ephemeral=True
-            )
-
-    @moments_group.command(
-        name="audit",
-        description="View unauthorized access attempts (Admin only)"
-    )
-    @app_commands.describe(days="Lookback period in days (max 30)")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def view_audit_log(interaction: discord.Interaction, days: int = 7):
-        try:
-            if days > 30 or days < 1:
-                raise ValueError("Lookback period must be 1-30 days")
-
-            cutoff = datetime.now() - timedelta(days=days)
-
-            with db._get_connection() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT * FROM unauthorized_access
-                    WHERE timestamp > ?
-                    ORDER BY timestamp DESC
-                """, (cutoff.isoformat(),))  # Store and compare ISO format
-
-            results = [dict(row) for row in cursor.fetchall()]
-
-            if not results:
-                await interaction.response.send_message("✅ No unauthorized access attempts found", ephemeral=True)
-                return
-
-            log_text = "\n".join(
-                f"<t:{int(datetime.fromisoformat(row['timestamp']).timestamp())}:f> | "
-                f"<@{row['user_id']}> tried `{row['command_used']}`"
-                for row in results
-            )
-
-            embed = discord.Embed(
-                title=f"Unauthorized Access Logs ({days} days)",
-                description=log_text[:4000],
-                color=0xff0000
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+            await interaction.response.send_message(
+                f"❌ Error: {str(e)}",
+                ephemeral=True
+            )
 
     client.tree.add_command(moments_group)

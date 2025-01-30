@@ -196,6 +196,29 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
+    def get_funny_moments_since(self, start_date: datetime) -> List[Dict]:
+        """Get funny moments since specified date"""
+        with self._get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM funny_moments
+                WHERE timestamp > ?
+                ORDER BY timestamp DESC
+            """, (start_date,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def purge_old_funny_moments(self, cutoff_date: datetime) -> int:
+        """Delete funny moments older than specified date"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM funny_moments
+                WHERE timestamp < ?
+            """, (cutoff_date,))
+            conn.commit()
+            return cursor.rowcount
+
     def log_unauthorized_access(self, user_id: int, command_used: str, details: str = ""):
         """Log unauthorized command attempts"""
         try:
