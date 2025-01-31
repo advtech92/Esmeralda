@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 
 
-class EmeraldClient(discord.Client):
+class EsmeraldaClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -61,6 +61,6 @@ class EmeraldClient(discord.Client):
 
 if __name__ == "__main__":
     load_dotenv()
-    client = EmeraldClient()
+    client = EsmeraldaClient()
 
     client.run(config.DISCORD_TOKEN)
